@@ -12,6 +12,17 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [audioLevel, setAudioLevel] = useState(0)
+  const [targetLanguage, setTargetLanguage] = useState("Arabic")
+  const processedItemsRef = useRef<Set<string>>(new Set())
+  const [currentResponse, setCurrentResponse] = useState("")
+
+  const languages = [
+    { name: "Arabic", label: "العربية" },
+    { name: "English", label: "English" },
+    { name: "French", label: "Français" },
+    { name: "Spanish", label: "Español" },
+    { name: "German", label: "Deutsch" },
+  ]
   
   const analyserRef = useRef<AnalyserNode | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -64,10 +75,15 @@ export default function Page() {
     setError(null)
     setIsLoading(true)
     setStatus("Generating ephemeral token...")
+    processedItemsRef.current.clear()
+    setCurrentResponse("")
 
     try {
-      // 1. Get ephemeral token
-      const sessionRes = await fetch("/api/session", { method: "POST" })
+      // 1. Get ephemeral token with target language
+      const sessionRes = await fetch("/api/session", { 
+        method: "POST",
+        body: JSON.stringify({ targetLanguage })
+      })
       if (!sessionRes.ok) throw new Error("Failed to create session")
       const sessionData = await sessionRes.json()
       const EPHEMERAL_KEY = sessionData.client_secret.value
@@ -100,14 +116,40 @@ export default function Page() {
           // When a transcription is completed for a user message
           if (event.type === "conversation.item.input_audio_transcription.completed") {
             const text = event.transcript || ""
-            if (text.trim()) {
-              setTranscript(prev => prev ? prev + " " + text.trim() : text.trim())
+            if (text.trim() && !processedItemsRef.current.has(event.item_id)) {
+              // If we are NOT translating, use this as the primary transcript
+              if (targetLanguage === "Arabic") {
+                setTranscript(prev => prev ? prev + " " + text.trim() : text.trim())
+                processedItemsRef.current.add(event.item_id)
+              } else {
+                console.log("Input (source):", text)
+              }
             }
           }
           
-          // Model response text (if we want to see what the AI says back)
-          if (event.type === "response.audio_transcription.delta") {
-             // Handle delta if we want to show AI speaking
+          // Streaming model response text (the translation)
+          if (event.type === "response.text.delta") {
+             if (targetLanguage !== "Arabic") {
+               setCurrentResponse(prev => prev + event.delta)
+             }
+          }
+
+          // Model response finished
+          if (event.type === "response.done") {
+             const items = event.response?.output || []
+             items.forEach((item: any) => {
+               if (item.type === "message" && item.role === "assistant") {
+                 const content = item.content?.find((c: any) => c.type === "audio" || c.type === "text")
+                 const text = item.content?.find((c: any) => c.type === "text")?.text || 
+                              item.content?.find((c: any) => c.type === "audio")?.transcript || ""
+                 
+                 if (text.trim() && targetLanguage !== "Arabic" && !processedItemsRef.current.has(item.id)) {
+                   setTranscript(prev => prev ? prev + " " + text.trim() : text.trim())
+                   processedItemsRef.current.add(item.id)
+                   setCurrentResponse("") // Clear the streaming buffer
+                 }
+               }
+             })
           }
 
           if (event.type === "error") {
@@ -189,12 +231,34 @@ export default function Page() {
       <div className="relative z-10 w-full max-w-2xl space-y-6">
         <div className="text-center space-y-2">
           <h1 className="text-4xl font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-            Real-time Arabic Transcription
+            Real-time Live Transcription
           </h1>
-          <p className="text-slate-400">Powered by OpenAI Whisper</p>
+          <p className="text-slate-400">Powered by OpenAI Realtime API</p>
         </div>
 
-        <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6 space-y-4">
+        <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6 space-y-6">
+          <div className="space-y-3">
+            <label className="text-sm font-medium text-slate-300 block text-center">
+              Select Output Language
+            </label>
+            <div className="flex flex-wrap justify-center gap-2">
+              {languages.map((lang) => (
+                <button
+                  key={lang.name}
+                  onClick={() => setTargetLanguage(lang.name)}
+                  disabled={isRecording}
+                  className={`px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${
+                    targetLanguage === lang.name
+                      ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/20"
+                      : "bg-white/5 text-slate-400 hover:bg-white/10"
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {lang.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="flex flex-col items-center gap-4">
             <button
               onClick={isRecording ? cleanupRealtime : initRealtimeSession}
@@ -256,7 +320,7 @@ export default function Page() {
           </div>
           <textarea
             ref={textareaRef}
-            value={transcript}
+            value={transcript + (currentResponse ? (transcript ? "\n" : "") + currentResponse : "")}
             readOnly
             dir="auto"
             placeholder="Speak in Arabic or English. Transcription will appear here..."
